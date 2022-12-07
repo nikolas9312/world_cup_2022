@@ -1,0 +1,924 @@
+---
+title: "Predicting the FIFA World Cup's Winner Using Machine Learning"
+author: "Nicolas Herrera"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: hide
+      theme: yeti
+      number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE , fig.align="center" , echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+<center>![](images/trophy.jpg){width="500"}</center>
+
+# Introduction
+
+Using historical data of 7326 international football games, I estimated a series of machine learning models capable of predicting the outcome of football games (i.e., either one of the teams win or they tie). Then, I will use the best model to predict the outcomes of the 64 matches played during the Men’s Football World Cup currently played in Qatar (World Cup). By this moment, the round of 16 is being played and 20 teams have been eliminated.
+
+## Football 101 and the FIFA World Cup
+
+Football (Association football or Soccer) is the most popular sport in the world. It is played by two teams of eleven people. The team that wins is the one that scores more goals by moving a round ball with their feet and scoring into a frame. The game is played for 90 minutes. The only possible outcomes of a match are either one of the teams wins or they draw.
+
+The FIFA World Cup is an international competition played by national football teams. It is the most prestigious football tournament in the world. Although the first official football matches started in the 19th century, the first world cup was celebrated in 1930 and has been played every four years (except during WWII). Just eight different countries have won the cup. Brazil is at the top of the list with five titles won.
+
+During the three years preceding the cup, there is a qualification phase to determine which teams qualify for the tournament. Within each continent, qualifying tournaments are held and just 32 teams end up playing in the World Cup. Between world cups, other continental tournaments and friendly matches are played. This project will use the matches prior to the world cup to estimate a model that is able to predict the outcome of a match and implement that estimation to predict the outcomes of the World Cup that is currently being played in Qatar. The following are the countries participating in the Cup:
+
+<center>![](images/wc_groups.png){width="400"}</center>
+
+In the first phase of the World cup, teams are divided into groups of four. They play three matches within their group. Winning a game is equivalent to three points, drawing to one point, and losing to zero points. The two teams with more points within a group qualify for the next round of the tournament. Then, the 16 teams Then remaining teams enter the play-offs where a team is eliminated after losing a match in each round. The champion is the one that qualifies in the first phase and wins all the matches in the second phase. As no drawings are allowed in the second phase, if two teams are tied at the end of the match, they play a series of penalty shoot-outs to determine the winner.
+
+In the first phase of the World cup, teams are divided into groups of four. They play three matches within their group. Winning a game is equivalent to three points, drawing to one point, and losing to zero points. The two teams with the most points within a group qualify for the next round of the tournament. Then, the 16 remaining teams enter the play-offs where a team is eliminated after losing a match in each round. The champion is the one that qualifies from the first phase and wins all the matches in the second phase. As no draws are allowed in the second phase, if two teams are tied at the end of the match, they play a series of penalty shoot-outs to determine the winner.
+
+## Roadmap of the project
+
+To predict who will be the champion, first, we need to build a model that most accurately classifies the outcome of an individual game. Therefore, this project will use historical data from international soccer matches, team rankings and video game data, to predict the probability that either one of the teams win or tie. Then, I will estimate different classification models and assess which model better predicted the result of a game. The model that performs the best in the sample, will be used to predict the outcomes of the 64 games of the current world cup as a way to compare the accuracy of the model with a real-life situation.
+
+# Data Description and Cleaning
+
+This section will describe the data sets used to build the model and display the code that cleans the data. First, I load the packages to be used throughout the project.
+
+```{r }
+# Load packages
+library(tidyverse)
+library(showtext)
+library(janitor)
+library(tidymodels)
+library(lubridate)
+library(fastDummies)
+library(ggplot2)
+library(zoo) # moving averages
+library(readxl)
+library(stringr)
+library(viridis)
+library(hrbrthemes)
+library(gridExtra)
+library(corrplot)
+tidymodels_prefer()
+library(summarytools)
+library(vembedr)
+library(ggridges)
+
+# Vector of colors
+colors_3 <- c("#1170AA", "#55AD89", "#EF6F6A")
+colors <- c("#D33F49" , "#107E7D", "#EF6F6A"  ,"#65AFFF",  "#F6AE2D" , "#011936" , "#5B7B7A" , "#C7EFCF" , "#442B48")
+
+# Personalized theme
+
+
+theme_per <- function(base_size = 14) {
+  theme_bw(base_size = base_size) %+replace%
+    theme(
+      # L'ensemble de la figure
+      plot.title = element_text(size = rel(0.65), hjust = 0.5 , margin = margin(0,0,15,0) ),
+      # Zone où se situe le graphique
+      #panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      # Les axes
+      axis.title = element_text(size = rel(0.65)),
+      axis.text = element_text(size = rel(0.65)),
+      axis.line = element_line(color = "black", arrow = arrow(length = unit(0.3, "lines"), type = "closed")),
+      # La légende
+      legend.title = element_text(size = rel(0.65)),
+      legend.text = element_text(size = rel(0.60)),
+      legend.key = element_rect(fill = "transparent", colour = NA),
+      legend.key.size = unit(1, "lines"),
+      legend.background = element_rect(fill = "transparent", colour = NA),
+      # Les étiquettes dans le cas d'un facetting
+      strip.background = element_rect(fill = "#17252D", color = "#17252D"),
+      strip.text = element_text(size = rel(0.85), face = "bold", color = "white", margin = margin(5,0,5,0))
+    )
+}
+
+```
+
+## Raw Data
+
+For this project I used three main data sources available at Kaglee:
+
+-   [**International football results from 1872 to 2022**](https://www.kaggle.com/datasets/martj42/international-football-results-from-1872-to-2017?select=results.csv): The dataset contains 44,104 results of international football matches starting from the very first official match in 1872 up to 2022. The sample covers any match before the current World Cup i.e any match before 2022-11-17. It includes tournaments, qualifier tournaments, FIFA World Cup, and friendly matches.
+
+    This dataset has game-level information containing the name of the teams involved, the date of the match, the score, the tournament, and the place where the match was held. The following is an extract of the data showing the most recent games before the World Cup:
+
+```{r games}
+
+# Importing the results *International football results from 1872 to 2022 and creating base variables
+#-----------------------------------------------------------------------------------
+
+results <- read_csv("data/results.csv") %>% # Load data 
+  clean_names() %>% # Clean the variable names
+  mutate(date = as.Date(date, "%Y-%m-%d")) %>%  # Declare the dates in the correct format
+  mutate(year=year(date) , month=month(date)) %>% # Create variables for year and month
+  filter(!is.na(home_score) | !is.na(away_score)) %>% # Keep the games with results,removing games of the current WC
+  mutate(home_result = factor(ifelse(home_score > away_score , "win" , # Creates two variables with the result of the match for home and away
+                                     ifelse(home_score == away_score , 
+                                            "draw" , "loss")))  ,
+         away_result = factor(ifelse(home_score < away_score , "win" , 
+                                     ifelse(home_score == away_score , 
+                                            "draw" , "loss") )) , 
+         across('home_team', str_replace , "Brunei Darussalam" ,"Brunei") , # Clean country names to match
+         across('away_team', str_replace , "Brunei Darussalam" ,"Brunei")) %>% 
+  dummy_cols(select_columns = c('home_result' , 'away_result')) # Create dummies of each 
+
+# Overview main data
+knitr::kable(results[44100:44104,1:9], format="markdown")
+```
+
+-   [**FIFA World Ranking 1992 - 2022**](https://www.kaggle.com/datasets/cashncarry/fifaworldranking): This dataset contains the [FIFA Ranking](https://www.fifa.com/fifa-world-ranking/men?dateId=id13792) for men's national teams between 1992 to 2022. The ranking is a comparison of the relative strengths of the 211 nations associated with FIFA. It is widely used to organize tournaments. For instance, the 8 teams that are at the top of the list before a World Cup are placed in different groups for the first phase. FIFA computes points based on the Elo rating system and ranks teams based on the points earned previously.
+
+    The calculation procedure of the points for the ranking has changed over time. Instead, I computed the average number of points awarded per country and year. Then, I create a standardized index with a value of 100 for the team with the highest average number of points during the year and 0 for the lowest. The difference between indexes is a measure of the difference in strength between two countries. The following is an extract of the data::
+
+```{r}
+# Fifa ranking
+#-----------------------------------------------------------------------------------
+fifa_ranking <- read_csv("data/fifa_ranking.csv") %>% 
+  clean_names() %>% 
+  mutate(date = as.Date(rank_date, "%Y-%m-%d") , year=year(date) ,
+         across('country_full', str_replace , "Brunei Darussalam" ,"Brunei") , 
+         across('country_full', str_replace , "Cabo Verde" ,"Cape Verde") , 
+         across('country_full', str_replace , "Cape Verde Islands" ,"Cape Verde") ,
+         across('country_full', str_replace , "Congo DR" ,"DR Congo") ,
+         across('country_full', str_replace , "IR Iran" ,"Iran"), 
+         across('country_full', str_replace , "Côte d'Ivoire" ,"Ivory Coast"),
+         across('country_full', str_replace , "Kyrgyz Republic" ,"Kyrgyzstan"),
+         across('country_full', str_replace , "Korea DPR" ,"North Korea"),         
+         across('country_full', str_replace , "St. Kitts and Nevis" ,"Saint Kitts and Nevis"),   
+         across('country_full', str_replace , "St. Vincent / Grenadines" ,"Saint Vincent and the Grenadines"), 
+         across('country_full', str_replace , "St. Vincent and the Grenadines" ,"Saint Vincent and the Grenadines"), 
+         across('country_full', str_replace , "Korea Republic" ,"South Korea"), 
+         across('country_full', str_replace , "St. Vincent and the Grenadines" ,"Saint Vincent and the Grenadines"), 
+         across('country_full', str_replace , "USA" ,"United States"), 
+         across('country_full', str_replace , "US Virgin Islands" ,"United States Virgin Islands") ,
+         across('country_full', str_replace , "FYR Macedonia" ,"North Macedonia")) %>% 
+  select(year , country_full, total_points) %>% 
+  group_by(country_full , year) %>% 
+  summarize(ranking_fifa = mean(total_points)) %>% 
+  ungroup() %>% 
+  group_by(year) %>% 
+  mutate( max = max(ranking_fifa) , min = min(ranking_fifa) ,
+          ranking_fifa= (ranking_fifa - min)*100/(max - min)) %>% 
+  select(-max , -min) %>% 
+  ungroup()
+
+# Overview main data
+knitr::kable(fifa_ranking[240:246,1:3], format="markdown")
+```
+
+-   [**FIFA 15 to 22 Videogame Player Datataset**](https://www.kaggle.com/datasets/stefanoleone992/fifa-22-complete-player-dataset) and [**FIFA 23 Videogame Player Datataset**](https://www.kaggle.com/datasets/sanjeetsinghnaik/fifa-23-players-dataset): This dataset contains player-level data from the series of FIFA video games released annually between 2015 and 2023 by EA Sports. This franchise has the Guinness World record as the best-selling sports video game franchise in the world. For each player in the game, there are a series of attributes that make the character perform as close as possible to the player in real life.
+
+    This dataset contains characteristics of the player such as nationality, age, and market valuation. Additionally, as every player in the game is based on the real character’s performance during the season, each player has an overall score that summarizes his strength in the game. It is based on around 30 statistics including shooting, passing, pace, stamina, dribbling, and more (all scores are integers between 50 and 100).
+
+    For international games, the coach of a team may call any national of the country who has not played with another national senior team in the past. As it is difficult to merge the exact squad per game to train the model, my overall team score will be the average overall score of the top 26 players by country and lagged year.
+
+    Different than the FIFA ranking, the video game's overall score for a team, measures the skills of the top players in the country and apriori it is a good candidate to predict the outcome of a match. Since 2010, [EA sports has simulated the World Cups using their game and has correctly predicted  the last three winners](https://www.nbcsports.com/philadelphia/ea-sports-predicts-lionel-messi-argentina-2022-world-cup-champions).
+
+    The code below creates a year-country measure of the strength of each national team based on the points awarded to each player in the video game. The overall score of the team is standardized to have a value of 100 for the highest observation per year and 0 for the lowest. The following table shows an extract of the data for the FIFA 23 game:
+
+```{r}
+# Fifa game datasets
+#----------------------------------------------------------------------
+# Function to read and summarize scores in fifa game by country
+fifa_game <- function(y) {
+  path_data <- paste0("data/players_",y,".csv")
+  game_scores <- read_csv(path_data) %>% 
+    clean_names() %>% 
+    mutate(overall=(overall+potential)/2) %>% 
+    arrange(nationality_name , desc(overall)) %>% 
+    group_by(nationality_name) %>% 
+    mutate(ranking_player = seq_along(nationality_name)) %>% 
+    ungroup() %>% 
+    filter(ranking_player < 27) %>% 
+    mutate(year= y + 2000 - 1) %>% 
+    group_by(nationality_name , year) %>% 
+    summarize(overall = mean(overall) , npg=max(ranking_player)) %>%
+    ungroup() %>%
+    mutate(year=ifelse(nationality_name=="Bhutan",2019,year) , 
+           across('nationality_name', str_replace , "Cape Verde Islands" ,"Cape Verde") ,
+           across('nationality_name', str_replace , "Curacao" ,"Curaçao") ,
+           across('nationality_name', str_replace , "Congo DR" ,"DR Congo") ,
+           across('nationality_name', str_replace , "Guinea Bissau" ,"Guinea-Bissau") ,
+           across('nationality_name', str_replace , "Guinea Bissau" ,"Guinea-Bissau") ,
+           across('nationality_name', str_replace , "Côte d'Ivoire" ,"Ivory Coast") ,
+           across('nationality_name', str_replace , "Korea DPR" ,"North Korea") ,
+           across('nationality_name', str_replace , "Korea Republic" ,"South Korea"))
+  return(game_scores) 
+}
+
+# Create a list of datasets for each game
+year_fifa <- c(15:23)
+fifa_15_23 <- lapply(year_fifa, fifa_game)
+
+# append them
+fifa_game_scores <- bind_rows(fifa_15_23[1], fifa_15_23[2], fifa_15_23[3], fifa_15_23[4],
+                              fifa_15_23[5], fifa_15_23[6], fifa_15_23[7], fifa_15_23[8],
+                              fifa_15_23[9]) %>% 
+  group_by(year) %>% 
+  mutate(overall_max = max(overall) , overall_min = min(overall) ,
+         overall= (overall - overall_min)*100/(overall_max - overall_min)) %>% 
+  select(-overall_min , -overall_max) %>% 
+  ungroup()
+
+# Remove list of datasets
+rm(fifa_15_23)
+
+# Retrieve one part of the dataset and show the top of the data
+fifa_23 <- read_csv("data/players_23.csv") %>% 
+  clean_names() %>%
+  head() %>% 
+  mutate(value_in_euro = value_in_euro /1000000) %>%  
+  select(known_as , overall , value_in_euro , nationality_name , age , shooting_total, dribbling_total , passing_total)
+
+knitr::kable(fifa_23[1:5,1:7], format="markdown")
+```
+
+## Data Cleaning
+
+To estimate the models, I produced a unique dataset where each observation is a game. It includes the outcome of the game and features that predict the result such as the performance of each team in recent matches and tournaments, rankings, and video game scores. I restrict the information to games played since 2014 for two reasons. First, each FIFA video game is released in September of the previous year. The earliest data available corresponds to FIFA 15, released in September 2014. Second, because of the evolution of the sport, historically weaker nations have improved their performance in tournaments, the skills of a squad may not be entirely captured by historical data. Also, I will restrict the data to any match played by countries included in the ranking FIFA as they are the ones that can qualify for the tournament.
+
+```{r }
+# Database of the matches of the first round for the 2022 world cup
+world_cup <- read_csv("data/results.csv") %>% 
+  clean_names() %>% 
+  filter(tournament == "FIFA World Cup" & country == "Qatar") %>% 
+  mutate(year=year(date)) 
+
+# Countries playing current world cup
+world_cup_countries <- as_tibble(world_cup$home_team) %>% 
+  bind_rows(as_tibble(world_cup$away_team)) %>% 
+  unique() %>% 
+  mutate(playing_wc = 1) %>% 
+  rename(team = value)
+
+# Results for the entire history of the cups
+results <- read_csv("data/results.csv") %>% 
+  clean_names() %>% 
+  mutate(date = as.Date(date, "%Y-%m-%d")) %>% 
+  mutate(year=year(date) , month=month(date)) %>% 
+  filter(!is.na(home_score) | !is.na(away_score)) %>% 
+  mutate(home_result = factor(ifelse(home_score > away_score , "win" , 
+                                     ifelse(home_score == away_score , 
+                                            "draw" , "loss")))  ,
+         away_result = factor(ifelse(home_score < away_score , "win" , 
+                                     ifelse(home_score == away_score , 
+                                            "draw" , "loss") )) , 
+         across('home_team', str_replace , "Brunei Darussalam" ,"Brunei") ,
+         across('away_team', str_replace , "Brunei Darussalam" ,"Brunei")) %>% 
+  dummy_cols(select_columns = c('home_result' , 'away_result')) 
+
+# Include in the main database the FIFA game score
+results <- results %>% 
+  left_join(fifa_game_scores , c("home_team" = "nationality_name" , "year")) %>% 
+  rename_at(vars(overall , npg),function(x) paste0(x,"_home")) %>% 
+  left_join(fifa_game_scores , c("away_team" = "nationality_name" , "year")) %>% 
+  rename_at(vars(overall , npg),function(x) paste0(x,"_away"))
+
+# Include in the main database the FIFA ranking
+results <- results %>% 
+  left_join(fifa_ranking , c("home_team" = "country_full" , "year")) %>% 
+  rename_at(vars(ranking_fifa),function(x) paste0(x,"_home")) %>% 
+  left_join(fifa_ranking , c("away_team" = "country_full" , "year")) %>% 
+  rename_at(vars(ranking_fifa),function(x) paste0(x,"_away"))
+
+# Include in the main database and indicator of a match played by countries 
+# in the current WC
+
+results <- results %>% 
+  left_join(world_cup_countries , c("home_team" = "team")) %>% 
+  left_join(world_cup_countries , c("away_team" = "team")) %>% 
+  mutate(playing_wc = if_else((playing_wc.x == 1 | playing_wc.y == 1), 
+                               1 , 0, missing = 0)) %>% 
+  select(-playing_wc.x  , -playing_wc.y)
+
+# Results as list
+#----------------------------------------------------------------------
+
+# Create a dataset with information about home teams
+results_home <- results %>% 
+  rename( team = home_team , goals_scored = home_score ,
+          goals_received = away_score ,
+          win = home_result_win , 
+          draw = home_result_draw ,
+          loss = home_result_loss ,
+          ranking_fifa = ranking_fifa_home, 
+          ranking_fifa_opp = ranking_fifa_away ,
+          overall = overall_home  , 
+          overall_opp = overall_away ) %>%  
+  select(year , team , goals_scored , goals_received , 
+         win, draw , loss , tournament , date , starts_with("ranking_fifa") ,
+         starts_with("overall"))  %>% 
+  mutate(home = 1)
+
+# Create a dataset with information about visiting teams
+results_away <- results %>% 
+  rename( team = away_team , goals_scored = away_score ,
+          goals_received = home_score ,
+          win = away_result_win , 
+          draw = away_result_draw ,
+          loss = away_result_loss ,
+          ranking_fifa = ranking_fifa_away, 
+          ranking_fifa_opp = ranking_fifa_home ,
+          overall = overall_away  , 
+          overall_opp = overall_home) %>% 
+  select(year , team , goals_scored , goals_received , 
+           win, draw , loss , tournament , date , starts_with("ranking_fifa") ,
+           starts_with("overall"))  %>% 
+  mutate(home = 0)
+
+# Create a list of the countries that played the qualification phase to the WC 
+country_wc_qualifier <- results_home %>%  
+  bind_rows(results_away) %>% 
+  filter(year >2017 & tournament == "FIFA World Cup qualification") %>% 
+  select(team) %>% 
+  unique()
+
+# Update the results to matches where both countries played the qualification phase of 
+# the current World Cup
+
+results <- results %>% 
+  right_join(country_wc_qualifier , c("home_team" = "team"))  %>% 
+  right_join(country_wc_qualifier , c("away_team" = "team"))   
+  
+# Create a list of results of countries that played the current phase of the WC
+results_list <- results_home %>%  # home results
+  bind_rows(results_away) %>% # append away results
+  right_join(country_wc_qualifier) %>% 
+  mutate(points = win*3 + draw) %>% 
+  unique()
+  rm(results_home , results_away) # remove from memory duplicate data
+
+# List of tournaments
+tournaments <- results_list %>%
+  filter(year >2014) %>% 
+  select(tournament) %>% 
+  unique() 
+
+# Tournaments
+#----------------------------------------------------------------------
+
+# List of continental tournaments
+continental_tournaments <- c("AFC Asian Cup" ,
+                             "African Cup of Nations" ,
+                             "UEFA Euro qualification" ,
+                             "Gold Cup qualification" ,
+                             "Copa América" ,
+                             "African Cup of Nations qualification" ,
+                             "Gold Cup" ,
+                             "Oceania Nations Cup qualification" , 
+                             "Oceania Nations Cup" , 
+                             "UEFA Euro" , 
+                             "Confederations Cup" ,
+                             "UEFA Nations League" , 
+                             "CONCACAF Nations League" ,
+                             "FIFA World Cup" ,
+                             "Confederations Cup")
+
+# Historical results in a rolling window
+#--------------------------------------------------------------------------
+
+# Entire history
+results_hist <- results_list %>%  
+  mutate( n = 1) %>% 
+  arrange(team , date) %>% 
+  group_by(team) %>% 
+  mutate(sh_win = cummean(win)) %>% 
+  select(team, date , sh_win)
+
+# Since FIFA Ranking exists and there are 32 teams in the WC (Ranking FIFA available)
+results_hist_rf <- results_list %>%  
+  filter(year>=1994 & !is.na(ranking_fifa_opp)) %>% 
+  mutate( n = 1) %>% 
+  arrange(team , date) %>% 
+  group_by(team) %>% 
+  mutate(sh_win = cummean(win) , 
+         sh_loss = cummean(loss) , 
+         av_goal_sc = cummean(goals_scored) ,
+         av_goal_rec = cummean(goals_received) ,
+         av_rf_opp = cummean(ranking_fifa_opp)) %>% 
+  select(team, date , starts_with("sh_") , 
+         starts_with("av_")) 
+
+# Rolling basis results
+#----------------------------------------------------------------------
+
+# All last matches
+results_rolling <- results_list %>% 
+  arrange(team , date) %>% 
+  group_by(team) %>% 
+  mutate(match_number = seq_along(team)) %>% 
+  ungroup() %>% 
+  filter(!is.na(ranking_fifa_opp)) %>% 
+  mutate(m5_goals_sc = ifelse(match_number > 5 , rollmean(goals_scored, k = 5, fill = NA , align="right") , NA) ,
+         m15_goals_sc = ifelse(match_number > 15 , rollmean(goals_scored, k = 15, 
+                                                            fill = NA , align="right") , NA) ,
+         m5_goals_rec = ifelse(match_number > 5 , rollmean(goals_received, k = 5, 
+                                                           fill = NA , align="right") , NA) ,
+         m15_goals_rec = ifelse(match_number > 15 , rollmean(goals_received,
+                                                             k = 15, fill = NA , align="right") , NA) ,
+         m5_sh_win = ifelse(match_number > 5 , rollmean(win, k = 5, fill = NA , align="right") , NA) ,
+         m15_sh_win = ifelse(match_number > 15 , rollmean(win, k = 15, fill = NA , align="right") , NA) ,
+         m5_sh_loss = ifelse(match_number > 5 , rollmean(loss, k = 5, fill = NA , align="right") , NA) ,
+         m15_sh_loss= ifelse(match_number > 15 , rollmean(loss, k = 15, fill = NA , align="right") , NA) ,
+         m5_rf_opp = ifelse(match_number > 5 , rollmean(ranking_fifa_opp, k = 5, fill = NA ,
+                                                        align="right") , NA) ,
+         m15_rf_opp = ifelse(match_number > 15 , rollmean(ranking_fifa_opp, k = 15, fill = NA ,
+                                                        align="right") , NA) ,
+        m30_goals_sc = ifelse(match_number > 30 , rollmean(goals_scored, k = 30, fill = NA , align="right") , NA),
+        m30_goals_rec = ifelse(match_number > 30 , rollmean(goals_received, k = 30, fill = NA ,
+                                                            align="right"),NA),
+        m30_sh_win = ifelse(match_number > 30 , rollmean(win, k = 30, fill = NA , align="right") , NA) ,
+        m30_sh_loss = ifelse(match_number > 30 , rollmean(loss, k = 30, fill = NA , align="right") , NA) ,
+        m30_rf_opp = ifelse(match_number > 30 , rollmean(ranking_fifa_opp, k = 30, fill = NA ,
+                                                        align="right") , NA)) %>% 
+  select(team, date , starts_with("m5") , starts_with("m15") , starts_with("m30")) 
+         
+# Results in world cups
+#----------------------------------------------------------------------
+
+# Filter the matches played in the World Cups and create a rolling sum of the
+# number of matches
+results_wc <- results_list %>%  
+  filter(tournament == "FIFA World Cup") %>% 
+  mutate( n = 1) %>% 
+  group_by(team , year) %>%
+  summarize( matches = sum(n)) %>% 
+  ungroup() %>% 
+  group_by(team) %>%  complete(year = seq(1930,2018)) %>%
+  mutate(across(matches , ~replace_na(.,0))) %>% 
+  mutate(n_matches_wch = cumsum(matches),
+         year = year +4) %>% 
+  select(-matches)
+
+# Join with results
+#----------------------------------------------------------------------
+
+# Keep just information of the matches played since 2014
+results <- results %>% 
+  filter(year >=2014) %>% 
+  filter(home_team !=away_team) %>%
+  unique() %>% 
+  filter(!is.na(ranking_fifa_home)) %>% 
+  filter(!is.na(ranking_fifa_away))  # Remove games with countries outside ranking FIFA
+  
+# Join historical results
+results <- results %>% 
+  left_join(results_hist ,by =c("home_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win),function(x) paste0(x,"_hist_home")) %>% 
+  left_join(results_hist , by =c("away_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win),function(x) paste0(x,"_hist_away")) 
+
+# Join historical results since Ranking FIFA exists
+results <- results %>% 
+  left_join(results_hist_rf ,by =c("home_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win:av_rf_opp),function(x) paste0(x,"_hist_rf_home")) %>% 
+  left_join(results_hist_rf , by =c("away_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win:av_rf_opp),function(x) paste0(x,"_hist_rf_away")) 
+
+# Join rolling basis 
+results <- results %>% 
+  left_join(results_rolling , by =c("home_team" = "team" , "date")) %>% 
+  rename_at(vars(m5_goals_sc:m30_rf_opp),function(x) paste0(x,"_home")) %>% 
+  left_join(results_rolling , by =c("away_team" = "team" , "date")) %>% 
+  rename_at(vars(m5_goals_sc:m30_rf_opp),function(x) paste0(x,"_away"))
+
+# Join results in World Cups
+results <- results %>% 
+  left_join(results_wc , by =c("home_team" = "team" , "year")) %>% 
+  rename_at(vars(ends_with("_wch")),function(x) paste0(x,"_home")) %>%  
+  left_join(results_wc , by =c("away_team" = "team" , "year")) %>% 
+  rename_at(vars(ends_with("_wch")),function(x) paste0(x,"_away")) %>%    
+  mutate(across(n_matches_wch_home:n_matches_wch_away , ~replace_na(.,0)))
+
+# Create a smaller dataset with the variables that will be used in the model
+results <- results %>% 
+         mutate(ranking_fifa_dha = ranking_fifa_home - ranking_fifa_away ,
+                overall_dha =  overall_home - overall_away  ,
+                sh_win_hist_dha = sh_win_hist_home - sh_win_hist_away  , 
+                sh_win_dha = sh_win_hist_rf_home - sh_win_hist_rf_away  , 
+                sh_loss_dha = sh_loss_hist_rf_home - sh_loss_hist_rf_away  , 
+                av_goal_sc_dha = av_goal_sc_hist_rf_home - av_goal_sc_hist_rf_away ,
+                av_goal_rec_dha = av_goal_rec_hist_rf_home - av_goal_rec_hist_rf_away ,
+                av_rf_opp_dha = av_rf_opp_hist_rf_home - av_rf_opp_hist_rf_away , 
+                w_sh_win_dha = av_rf_opp_hist_rf_home*sh_win_hist_rf_home -
+                  sh_win_hist_rf_away*av_rf_opp_hist_rf_away ,
+                m5_sh_win_dha = m5_sh_win_home - m5_sh_win_away  , 
+                w_m5_sh_win_dha = m5_sh_win_home*m5_rf_opp_home - m5_sh_win_away*m5_rf_opp_away  , 
+                m5_sh_loss_dha = m5_sh_loss_home - m5_sh_loss_away  , 
+                m5_goals_sc_dha = m5_goals_sc_home - m5_goals_sc_away ,
+                m5_goals_rec_dha = m5_goals_rec_home - m5_goals_rec_away ,
+                m5_rf_opp_dha = m5_rf_opp_home - m5_rf_opp_away ,
+                m15_sh_win_dha = m15_sh_win_home - m15_sh_win_away  , 
+                w_m15_sh_win_dha = m15_sh_win_home*m15_rf_opp_home - 
+                  m15_sh_win_away*m15_rf_opp_away  , 
+                m15_sh_loss_dha = m15_sh_loss_home - m15_sh_loss_away  , 
+                m15_goals_sc_dha = m15_goals_sc_home - m15_goals_sc_away ,
+                m15_goals_rec_dha = m15_goals_rec_home - m15_goals_rec_away ,
+                m15_rf_opp_dha = m15_rf_opp_home - m15_rf_opp_away , 
+                 m30_sh_win_dha = m30_sh_win_home - m30_sh_win_away  , 
+                w_m30_sh_win_dha = m30_sh_win_home*m30_rf_opp_home - 
+                  m30_sh_win_away*m30_rf_opp_away  , 
+                m30_sh_loss_dha = m30_sh_loss_home - m30_sh_loss_away  , 
+                m30_goals_sc_dha = m30_goals_sc_home - m30_goals_sc_away ,
+                m30_goals_rec_dha = m30_goals_rec_home - m30_goals_rec_away ,
+                m30_rf_opp_dha = m30_rf_opp_home - m30_rf_opp_away ,
+                n_matches_wch_dha=n_matches_wch_home - n_matches_wch_away , 
+                score_dha = home_score - away_score) %>% 
+  select(date , home_team , away_team , tournament , neutral , year, date , home_result , ends_with("_dha"))
+
+# Export cleaned dataset
+write_csv(results, "data/results_cleaned.csv")
+
+```
+
+The model I have in mind predicts the result of a match by comparing the relative strength of two teams. Therefore, the features I used are measures of the difference between the two teams in several dimensions. The final dataset will contain the following variables[^1]:
+
+[^1]: For each variable at home there is an away analogous and any share or mean is computed using data up to the previous game played for each team i.e I am always using lagged data
+
+### Match variables
+
+-   `neutral` : The game was played in a neutral field i.e. neither team is hosting.
+-   `year` : Year that the game was played.
+-   `date`: Date of the game.
+-   `tournament:` Name of the tournament played or if the match is friendly.
+-   `home_team` : Name of the team playing a game in their country.
+-   `away_team` : Name of the team playing a game in a visiting country.
+-   `score_dha` : Home-Away difference in the goals scored during a match.
+-   `home_result` : Outcome of the match for the home team, either win, loss or draw.
+
+### Rankings :
+
+-   `overall_dha` : Home-Away difference in the mean score of the best 26 players in the FIFA video game for the year of the match. . Normalized to 100 for the team with the highest overall score 1st in a year.
+-   `ranking_fifa_dha` : Home-Away difference in the points used to create the Ranking FIFA. Normalized to 100 for the team ranked 1st during the year.
+
+### Historical :
+
+-   `sh_win_hist_dha` : Home-Away difference in the share of games won in any competition recorded up to the date.
+-   `n_matches_wch_dha` : Home-Away difference in the number of matches played in the previous World Cups.
+
+### Recent History (Since the creation of the Ranking FIFA in 1994):
+
+-   `sh_win_dha` : Home-Away difference in the share of matches won since 1994.
+-   `sh_loss_dha` : Home-Away difference in share of matches loss since 1994.
+-   `av_goal_sc_dha` : Home-Away difference in the average goals scored since 1994.
+-   `av_goal_rec_dha` : Home-Away difference in the average goals received since 1994.
+-   `av_rf_opp_dha`: Home-Away difference in average ranking FIFA of the teams faced by the country used to compute the previous statistics since 1994.
+
+### Results of the last 5 games played:
+
+-   `m5_sh_win_dha` : Home-Away difference in the share of matches won in the last five games.
+-   `m5_sh_loss_dha` : Home-Away difference in share of matches in the last five games.\
+-   `m5_goals_sc_dha` : Home-Away difference in the average goals scored in the last five games.
+-   `m5_goals_rec_dha` : Home-Away difference in the average goals received in the last five games.
+-   `m5_rf_opp_dha` : Home-Away difference in average ranking FIFA of the teams faced by the country used to compute the previous statistics in the last five games.
+
+### Results of the last 15 games played:
+
+-   `m15_sh_win_dha` : Home-Away difference in the share of matches won in the last fifteen games.
+-   `m15_sh_loss_dha` : Home-Away difference in share of matches in the last fifteen games.\
+-   `m15_goals_sc_dha` : Home-Away difference in the average goals scored in the last fifteen games.
+-   `m15_goals_rec_dha` : Home-Away difference in the average goals received in the last fifteen games.
+-   `m15_rf_opp_dha` : Home-Away difference in average ranking FIFA of the teams faced by the country used to compute the previous statistics in the last fifteen games.
+
+### Results of the last 30 games played:
+
+-   `m30_sh_win_dha` : Home-Away difference in the share of matches won in the last thirty games.
+-   `m30_sh_loss_dha` : Home-Away difference in share of matches in the last thirty games.\
+-   `m30_goals_sc_dha` : Home-Away difference in the average goals scored in the last thirty games.
+-   `m30_goals_rec_dha` : Home-Away difference in the average goals received in the last thirty games.
+-   `m30_rf_opp_dha` : Home-Away difference in average ranking FIFA of the teams faced by the country used to compute the previous statistics in the last thirty games.
+
+# Exploratory Data Analysis
+
+## Summary statistics
+
+The table below contains summary statistics of the variables in the dataset. We can observe the following:
+
+-   The observations are games played between 2014-01-01 and 2022-11-16.
+
+-   There is information of the games played by more than 200 national teams .
+
+-   Most of the games between international teams are friendly i.e. there are no points or prices involved. The second most played tournament are the qualifiers for the World Cup.
+
+-   Most of the games are played in either one of the countries involved.
+
+-   There is more likelihood that the home team wins. This is a very good predictor for the outcome of a match and I will discuss it below.
+
+-   The games are played between teams with different levels of relative strength. The average match has a close level of strength between teams using the FIFA ranking or the overall video game score but their standard deviations are large. I take into account that there are 1813 missing values for the overall score by predicting those missing values with the year and the difference in rankings.
+
+-   There is missing data in the moving statistics using 15 and 30 lagged matches. They correspond to countries that have been newly affiliated to FIFA more recently like Kosovo.
+
+```{r , results ="asis"}
+
+# Read cleaned data
+results <- read_csv("data/results_cleaned.csv")
+
+# Print a summary table
+print(dfSummary(results, graph.magnif = 0.75, 
+      valid.col = FALSE ,varnumbers = FALSE ,
+      max.distinct.values = 5 , headings=FALSE ,
+      graph.col =FALSE , ) , max.tbl.height = 600, method = 'render' )
+```
+
+### Correlation between predictors
+
+The following graph shows the correlation between the variables that will be used in the model and the outcome. As expected, we can observe that the FIFA ranking and the overall score indexes have a positive linear relationship with the share of winnings. Historical information also has predictive power. The differences in the share of matches won historically and the number of matches played in all world cups have a coefficient of correlation of 0.35 and 0.30, respectively. The share of winnings/losses and average goals scored/received for different periods of time are positively/negatively related to the proportion of winnings. However, more recent games’ results have a higher correlation coefficient (in absolute value) for all these measures. Teams that have played against stronger^[Measured by the difference in the average FIFA ranking between opponents] in the past are also have a higher probability of winning.
+
+Given that most of the matches are friendlies and qualifiers, teams play with neighbors most of the time. Historically, stronger teams have been in Europe or South America. To take into account the strength of the teams in the computation of differences in predictors, I created a series of differences weighted by the strength of the opponent. For instance, w_sh_win is the difference between the shares of winnings between teams with each share multiplied by the average strength of the teams they faced. The weighted wins I included have a larger correlation coefficient for most of the measures.
+
+The results using the difference in shares of losses are the opposite of the winnings. However, predicting the draws seems more difficult as a close to zero difference should classify a result as a draw.
+
+```{r}
+# Create a correlation plot of the predictors and 
+results %>% 
+  dummy_cols(select_columns = c('home_result' , 'neutral')) %>% 
+  select(home_result_win, home_result_loss , home_result_draw , neutral_FALSE , ends_with("_dha")) %>% 
+  select(-score_dha) %>% 
+  drop_na() %>%
+  rename_at(.vars = vars(ends_with("_dha")),
+            .funs = funs(sub("[_]dha$", "", .))) %>% 
+  cor() %>% 
+  corrplot(method = 'color', diag = FALSE, type = 'upper',
+          pch.cex = 0.9 , tl.col="black", tl.srt=45 , tl.cex = 0.5 , addCoef.col = "black" , number.cex = 0.35 )
+
+```
+
+## Home Advantage
+
+Playing at home is a huge advantage because of the attendance of supporters (Cross and Uhrig, 2023). A team is declared a "Home Team" if the game is played in its country. Home teams in neutral locations do not seem to have a systematic relationship with the hosting country^[I did not change the order in those locations because as the data is scrapped from official sites, the order may be related to some proximity with the hosting country which will help to predict better the result]. 72.7% of the games in the sample are played in one of the team's countries. The games played on a neutral ground correspond, in general, to friendly matches or tournaments such as the World Cup.
+
+The left panel of the following figure shows the distribution of differences between the number of matches played in World Cups for both teams before that game. More than half of the nations that participate in qualifiers have never played a World Cup, for that reason, there are large differences in the number of matches played. During a tournament, a team can play at most seven games. This difference measures the historical strength of teams. We can see in the graph that there are many more positive differences in cases where the home team won compared to the other cases. Indeed, the 25th percentile of the win distribution is 0 whereas the loss distribution is -13. We can find a similar pattern with the share of winnings during the same period. A reassuring characteristic of drawings is that the distribution of differences is centered at zero.
+
+```{r  }
+# Save critical value of 1% level
+z<-qnorm(0.01, mean = 0, sd = 1, lower.tail = FALSE)
+
+# Create a bar graph comparing the percentage of the outcomes occurred per game 
+# divided by the location of the match
+results %>%
+  dummy_cols(select_columns = c('home_result')) %>% 
+  group_by(neutral) %>% 
+  summarize(matches=n() ,
+            win = mean(home_result_win) , 
+            loss = mean(home_result_loss) ,
+            draw = mean(home_result_draw)) %>% 
+  gather(result, percentage, win,loss,draw) %>% # Reshape the data to have unique columns
+  mutate(me = sqrt(percentage*(1-percentage)/matches)*z) %>% # Compute the margin of error per share
+  ggplot(aes(fill=result, y=percentage, x=neutral) ) +
+  geom_bar(position='dodge', stat='identity', colour="black" , alpha=0.7 ) +
+  labs(title="Home-team results by location of the game",
+       y="Percentage of occurrence" , x="Match played in neutral field" ,
+       caption = "Note: 99% confidence intervals at the top of each bar") +
+  theme_minimal() +
+  scale_fill_manual(values = colors_3) +
+  geom_errorbar( aes(x=neutral, ymin=percentage-me, ymax=percentage+me), 
+                 width=0.2, colour="black", position=position_dodge(.9)) + theme(plot.caption=element_text(hjust = -0.1 , size=6)) + theme(plot.title = element_text(hjust = 0.5))
+# Include 99% CI
+
+# Saving as PNG
+#png(file="images/bar_neutral.png", width=800, height=600)
+#bar_neutral
+#dev.off()
+
+```
+
+## Rankings
+
+### FIFA Ranking
+
+The FIFA ranking is a good predictor of the relative strength of teams. Out of the first 32 nations in the current ranking, 25 qualified for the 2022 World Cup. The following graph shows the number of months that a country has been at the top of the FIFA ranking during the period 1994-2022. Only eight countries have been at the top of the ranking during the last 28 years, six have been champions at some point in history and all the champions since 1990 have reached the first position of the rank. We can observe that Brazil has been at the top of the ranking for most of the period. It is also the country with the largest number of cups won (5).
+
+```{r}
+# Visualization of the top nations in the ranking
+#-----------------------------------------------------------------------------------
+read_csv("data/fifa_ranking.csv") %>% 
+  clean_names() %>% 
+  mutate(date = as.Date(rank_date, "%Y-%m-%d") , year=year(date)) %>% 
+  filter(rank == 1) %>% 
+  group_by(country_full , year) %>% 
+  summarize(n_top = sum(rank)) %>% 
+  mutate(n_top = replace(n_top, year == 1992 , n_top*12) ,
+         n_top = replace(n_top, year == 1993 , n_top*2) ,
+         n_top = replace(n_top, year == 1994 , n_top + 1) ,
+         n_top = replace(n_top, year >= 1995 & year <= 1998 , n_top + 2) ,
+         n_top = replace(n_top, year > 2018, n_top + 4)) %>% 
+  group_by(country_full) %>% 
+  summarize(m_top = sum(n_top)) %>% 
+  arrange(desc(m_top)) %>% 
+  ggplot(aes(x=  reorder(country_full, m_top), m_top , fill = country_full)) +
+  geom_bar(stat="identity") +
+  labs(title="Number of months on the top of the FIFA Ranking 1992-2002", y="Months" , x="Country") +
+  theme_minimal() + theme(legend.position="none") +
+  scale_fill_viridis_d() + 
+  coord_flip() + theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+The following graph shows the distribution of the differences between the Home and Away FIFA Rankings of the two teams involved in each game of the sample. There are three densities, referring to the outcome of the match from the point of view of the Home Team. We can observe that, on average, positive differences are related to winning the games, average null differences are related to ties and negative differences are related to losses. Therefore, using differences in the FIFA Ranking between teams seems to be able to classify the outcomes of matches.
+
+```{r}
+# Densities of differences in ranking fifa by outcome of the match
+ggplot(results, aes(x = ranking_fifa_dha, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25 , 0.5 , 0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") +
+  theme_per() + labs(title="Distribution of Differences in the Ranking FIFA \n by Outcome of the Home Team", x="Home Ranking FIFA - Away Ranking FIFA" , y="Result of the game", fill= "Type") 
+
+
+#+ theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+## Video game Scores
+
+The following figure compares the difference between teams using the overall video game index and the FIFA ranking Index for the years when World Cups were played in the sample. We can observe that both index capture a similar pattern comparing the relative strength of two teams. However, as both represent different ways to measure the skills of teams, they are not the same. More recent video games show an overall increase in the quality of the teams as well as less variation within teams as historically weaker nations have improved their quality.
+
+```{r}
+# Relation game score and FIFA ranking
+#----------------------------------------------------------------------
+
+# Yearly graph relating FIFA ranking and videogame scores
+results %>% 
+  filter(year== 2014 | year==2018 | year ==2022) %>% 
+  mutate(year=factor(year)) %>% 
+  ggplot(aes(y=overall_dha , x=ranking_fifa_dha, color=year , shape = year)) +
+  geom_point(alpha=0.5, aes(color=year)) + 
+  scale_color_manual(values = colors_3) +
+  geom_point(size = 1) +
+  geom_smooth(method = "lm", se = F) +
+  labs(y="Home - Away difference in videogame Score", x= " Home - Away difference inFIFA Ranking",
+       title="Yearly comparison between the Videogame and FIFA indexes") +
+  theme_minimal() + theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+## Historical results:
+
+The left panel of the following figure shows the distribution of differences between the number of matches played in World Cups for both teams before that game. More than half of the nations that participate in qualifiers have never played a World Cup, for that reason, there are large differences in the number of matches played. During a tournament, a team can play at most seven games. This difference measures the historical strength of teams. We can see in the graph that there are many more positive differences in cases where the home team won compared to the other cases. Indeed, the percentile 25th of the win distribution is 0 whereas the loss distribution is -13. We can find a similar pattern with the share of winnings during the same period. A reassuring characteristic of drawings is that the distribution of differences is centered at zero.
+
+```{r}
+
+# Share of winnings
+w1<- results %>% 
+  filter(n_matches_wch_dha < 51 & n_matches_wch_dha > -51) %>% 
+  ggplot(aes(x = n_matches_wch_dha, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25 , 0.50, 0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+   labs(title="Differences in the number of WC matched played  \n by Outcome of the Home Team", x="Home - Away number of WC matches" , y="Result of the game", fill= "Type") 
+
+w2<- ggplot(results, aes(x = sh_win_hist_dha, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25 , 0.5 , 0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis" ) + theme_per() +
+   labs(title="Differences in share of historical winnings \n by Outcome of the Home Team", x="Home - Away share of winning" , y="", fill= "Type") 
+
+# Include both graphs
+grid.arrange(w1, w2, ncol = 2)
+```
+
+## Historical results since 1994
+
+If we take the results since the FIFA ranking was created, we can compare the distribution of results to the strength of the opponents that each team faced. As we saw previously, the distribution of differences in the share of won matches has around 75% of the values on the positive side, whereas the distribution of losses is more on the negative side. The average strength of the opponents faced by the teams follows a close pattern. The majority of teams that won have faced historically stronger rivals than their opponents.
+
+```{r}
+
+p1<- results %>% 
+  mutate(outcome = sh_win_dha) %>% 
+  ggplot(aes(x = outcome, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25 , 0.5 , 0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+   labs(title="Differences in share of winnings since 1994 \n by Outcome of the Home Team", x="Home  - Away share of winning" , y="Result of the game", fill= "Type") + theme(legend.position="none")
+
+p2 <- results %>% 
+  mutate(outcome = av_rf_opp_dha) %>% 
+  ggplot(aes(x = outcome, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25 , 0.5 , 0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+   labs(title="Differences in the average strenght of opponents since 1994 \n by Outcome of the Home Team", x="Home - Away FIFA ranking index", y="" ,fill= "Type") 
+
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+```{r}
+
+```
+
+## Results in the last five matches:
+
+The following densities represent the distribution of differences in the share of won games in the previous five games for each team. The difference between both is that the right panel shows the share of won games multiplied by the strength of the teams faced. I introduced this measure because games are geographically localized and having a large share of winnings is different depending on the rivals, once you arrive at a major tournament. We can observe that the density of the raw share of wins is more irregular, yet, it follows the same patterns as seen previously. When multiplying each share by the average FIFA ranking index, we are measuring a sort of expected level of difficulty that a team can overcome. We can see that the pattern across distributions still holds.
+
+```{r}
+
+s1 <- results %>% 
+  mutate(outcome = m30_sh_win_dha) %>% 
+  ggplot(aes(x = outcome, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25,0.5,0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+   labs(title="Differences in share of winnings  \n in the last five games by Outcome of the Home Team", x="Home - Away share of winning" , y="Result of the game", fill= "Type") + theme(legend.position="none")
+
+s2 <- results %>% 
+  mutate(outcome = w_m30_sh_win_dha) %>% 
+  ggplot(aes(x = outcome, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25,0.5,0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+   labs(title="Differences in weigthed share of winnings  \n in the last five games by Outcome of the Home Team", x="Home - Away share of winning" , y="", fill= "Type") + theme(plot.title = element_text(hjust = 0.5))
+
+# Plot
+grid.arrange(s1, s2, ncol = 2)
+
+
+```
+
+## Goals in the last fifteen matches:
+
+The only way to be the World Champion is by scoring more goals than the rival. We can observe in the following graphs that teams that won a game, on average had more goals scored and fewer goals received in the last fifteen matches previous to the game.
+
+```{r}
+
+s1 <- results %>% 
+  mutate(outcome = m15_goals_sc_dha ) %>% 
+  ggplot(aes(x = outcome, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25,0.5,0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+   labs(title="Differences in average number of goals scored \n in the last 15 games by outcome of Home Team", x="Home - Away average goals scored" , y="Result of the game", fill= "Type") + theme(legend.position="none")
+
+s2 <- results %>% 
+  mutate(outcome = m15_goals_rec_dha) %>% 
+  ggplot(aes(x = outcome, y = reorder(home_result, desc(home_result)), fill = factor(..quantile..))) + 
+    stat_density_ridges(quantiles = c(0.25,0.5,0.75)
+                        , quantile_lines = TRUE
+                        , geom = "density_ridges_gradient"
+                        , alpha = 0.6
+                        , scale = 2.3) + 
+  scale_fill_viridis(discrete = TRUE
+                       , name = "Quartile"
+                       , alpha = 0.7
+                       , option = "viridis") + theme_per() +
+    labs(title="Differences in average number of goals received \n in the last 15 games by outcome of Home Team", x="Home - Away average goals received" , y="Result of the game", fill= "Type") + theme(plot.title = element_text(hjust = 0.5))
+
+# Plot
+grid.arrange(s1, s2, ncol = 2)
+```
+
+# References
+
+-   Cross, J., & Uhrig, R. (2023). Do Fans Impact Sports Outcomes? A COVID-19 Natural Experiment. Journal of Sports Economics, 24(1), 3--27.
