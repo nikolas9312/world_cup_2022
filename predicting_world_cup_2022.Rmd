@@ -1284,7 +1284,7 @@ augment(class_tree_fit, new_data = results_train) %>%
 
 ```
 
-# Random Forest
+## Random Forest
 
 The next model I estimate is a random forest. I choosed to tune three hyperparameters: The number of variables chosen at random, the number of trees and the minimun sample in each leave. The engine is ranger and importance chosen as `impurity`. I chosen to select at maximum 5 random variables and test a large number of trees (2000). 
 ```{r}
@@ -1319,7 +1319,7 @@ tune_rf <- tune_grid(
 saveRDS(tune_rf, file="model_results/random_forest.RData")
 ```
 
-## Analysis random forest
+### Analysis random forest
 The results of the random forest outperform any model so far, the ROC AUC of the model in the training set is 94.5%. Increasing the number of trees and variables increased considerably the performance of the model. The model is so far the only one also predicting accurately draws which may account for the large increase in the performance of the model.
 
 ```{r}
@@ -1803,10 +1803,10 @@ augment(test_fit_rf, new_data = quarter_final) %>%
  roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
 ```
 
-In terms of performance of the model, looking at the results I think is not a bad model. However, a short tournament with that level is more difficult to predict. The model predicted reasonable outcomes, however, many surprises happened during the cup.
+In terms of performance of the model, looking at the results I think is not a bad model. However, a short tournament with that level is more difficult to predict. The model predicted reasonable outcomes, however, many surprises happened during the cup. This model is useful to decide when there is no much knowledge or the sport or when two teams have close skills. I was surprised by some results but I realize the model was weighting more recent matches and that explain some results. For the future I would like to explore more machine learning and sport analytics I think they go well together given the massive amount of data available now. 
 
 
-Finally, I included the last four matches that will be played next week. 
+Finally, I predicted the outcomes of the last four matches that will be played next week: 
 
 
 ```{r}
