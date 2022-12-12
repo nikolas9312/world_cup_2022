@@ -64,6 +64,10 @@ tidymodels_prefer()
 library(summarytools)
 library(vembedr)
 library(ggridges)
+library(klaR) # for naive bayes
+library(discrim)
+library(rpart.plot)
+library(vip)
 
 # Vector of colors
 colors_3 <- c("#1170AA", "#55AD89", "#EF6F6A")
@@ -116,7 +120,7 @@ results <- read_csv("data/results.csv") %>% # Load data
   mutate(date = as.Date(date, "%Y-%m-%d")) %>%  # Declare the dates in the correct format
   mutate(year=year(date) , month=month(date)) %>% # Create variables for year and month
   filter(!is.na(home_score) | !is.na(away_score)) %>% # Keep the games with results,removing games of the current WC
-  mutate(home_result = factor(ifelse(home_score > away_score , "win" , # Creates two variables with the result of the match for home and away
+  mutate(home_result = factor(ifelse(home_score > away_score , "win" , # Creates two variables with the result of the match for
                                      ifelse(home_score == away_score , 
                                             "draw" , "loss")))  ,
          away_result = factor(ifelse(home_score < away_score , "win" , 
@@ -918,6 +922,908 @@ s2 <- results %>%
 # Plot
 grid.arrange(s1, s2, ncol = 2)
 ```
+
+
+# Models
+
+Previously, I show the data cleaning in a previous section. The following code uploads the data and dummy codes categorical variables related to the tournaments and the outcome. Also it eliminated missing values from matches where countries have not played 30 matches yet.
+
+
+```{r}
+
+# Read cleaned data
+results <- read_csv("data/results_cleaned.csv")
+
+# List of continental tournaments
+continental_tournaments <- c("AFC Asian Cup" ,
+                             "African Cup of Nations" ,
+                             "UEFA Euro qualification" ,
+                             "Gold Cup qualification" ,
+                             "Copa América" ,
+                             "African Cup of Nations qualification" ,
+                             "Gold Cup" ,
+                             "Oceania Nations Cup qualification" , 
+                             "Oceania Nations Cup" , 
+                             "UEFA Euro" , 
+                             "Confederations Cup" ,
+                             "UEFA Nations League" , 
+                             "CONCACAF Nations League" ,
+                             "Confederations Cup")
+
+# Convert to factors categorical predictors and outcome
+results <- results  %>%
+  mutate(home_result=factor(home_result) , 
+         neutral=ifelse(neutral =="TRUE" , 1 , 0) , 
+         friendly = ifelse(tournament =="Friendly" , 1 , 0) , # Create dummies for friendly matches
+         world_cup = ifelse(tournament =="FIFA World Cup" , 1 , 0), # Create for WC  matches
+         continental_tr = ifelse(tournament %in% continental_tournaments, 1 , 0) , # Create Tournaments
+         qualifier = ifelse(tournament =="FIFA World Cup qualification" , 1 , 0)) %>%  # Dummy for qualifier matches
+         # Dummy code years
+select(-tournament) %>% # Remove the tournament variable
+  filter(!is.na(m30_sh_win_dha)) # Filter missing values for countries that are recent adds to FIFA 
+
+```
+
+
+## Splitting data for cross-validation
+
+To perform cross-validation I will split the data into training and testing datasets. I chose to train the model with 80% of the observations, equivalent to 5798 matches. Then, I saved 5 folds using the training dataset. I stratified the split on the outcome variable because, as shown before, the outcome is unbalanced as there is more proportion of wins for the home team.
+
+
+```{r}
+# Splitting data
+#-----------------------------------------------------
+
+# Setting seed
+set.seed(1993)
+
+# Perform initial split, stratifying by the outcome variable with a proportion
+# of 80% in the training
+results_split <- initial_split(results, strata = "home_result" , prop = 0.8)
+
+# Create training sample
+results_train <- training(results_split)
+
+# Create testing sample
+results_test <- testing(results_split)
+
+# Perform 10-folds cross-validation
+results_fold <- vfold_cv(results_train, v = 5 , strata = "home_result")
+```
+
+## Creating recipe
+
+To compare the performance between models, I am using the same recipe for all of them. The outcome variable is the result for the home team and it will be predicted using all variables described in the data cleaning section. All nominal predictors were transformed into dummies and all numerical predictors are centered and scale. I also imputed using a linear regression missing values of the FIFA video game score using the FIFA ranking. As we saw in the descriptive analysis, they are correlated. 
+
+```{r}
+
+# Create recipe
+#-----------------------------------------------------
+
+# Include all predictors , no interactions
+games_recipe <- recipe(home_result ~ . , data = results_train) %>% 
+  step_rm(score_dha , date , home_team , away_team , year) %>% # Remove score difference as it is colinear with the result
+  step_dummy(all_nominal_predictors()) %>% # Transform to dummy all categorical predictors
+  step_normalize(all_numeric_predictors()) %>% # Center and scale nominal predictors
+  step_impute_linear(overall_dha, impute_with = imp_vars(ranking_fifa_dha , starts_with("year"))) 
+```
+
+## Fit a multinomial logistic regression using validation set approach
+
+The most basic model we can perform is a multinomial logistic regression without cross-validation. I use it as starting point to compare across models. First I specify the model using the `nnet` engine that allows me estimate the model without penalty or mixture terms. Then, I create a workflow and fit the model in the training data.
+
+```{r}
+# Specify a logistic regression model for classification
+mult_spec <- multinom_reg() %>% 
+  set_engine("nnet") %>% 
+  set_mode("classification")
+
+# create a workflow
+mult_wkflow <- workflow() %>% 
+  add_model(mult_spec) %>% 
+  add_recipe(games_recipe)
+
+# Fit model
+mult_vs_fit <- fit(mult_wkflow, data = results_train)
+
+# Accuracy of the model
+predict(mult_vs_fit, new_data = results_train, type = "class") %>% 
+  bind_cols(results_train %>% select(home_result)) %>% 
+  accuracy(truth = home_result, estimate = .pred_class)
+```
+
+We can see that the accuracy of this model is of 68.6 %. However, we know that depending on the training set that we use, this accuracy rate can change drastically. Therefore, I use 5-fold cross validation to have a better estimate of the model accuracy in the training data.
+
+## Fit a multinomial logistic regression using using 5 fold cross-validation
+
+Now, I will fit the same workflow as before on 5 folds previously choosen. 
+```{r , eval=FALSE}
+# We can use the same workflow and recipe
+mult_fit <- fit_resamples(mult_wkflow, results_fold)
+
+# Save results as an R object to not run it again when knitting
+saveRDS(mult_fit, file="model_results/mult_fit.RData")
+
+```
+
+### Multinomial logit metrics
+
+Using 5-fold cross-validation, I estimate an accuracy rate of the 67.88%. The previous estimate is more than 2 standard deviations above this accuracy estimate. Based on the ROC AUC, there is a 82.03% chance that the model will be able to distinguish match outcomes. 
+```{r}
+
+# Include Multinomial logit already fitted
+mult_fit <- readRDS("model_results/mult_fit.RData")
+
+# Collect metrics of 5 fold cross validation
+collect_metrics(mult_fit)
+
+```
+## Fit a LDA model using using 5 fold cross-validation
+
+I also estimate an LDA. In this case I specify the model using a linear discriminant and the MASS engine. I fit the same recipe as before in 5 folds.
+```{r , eval=FALSE}
+
+# Specify a LDA model for classification
+lda_spec <- discrim_linear() %>% 
+  set_engine("MASS") %>% 
+  set_mode("classification")
+
+# create a workflow
+lda_wkflow <- workflow() %>% 
+  add_model(lda_spec) %>% 
+  add_recipe(games_recipe)
+
+# Fit the model
+lda_fit <- fit_resamples(lda_wkflow, results_fold)
+
+# Save results as an R object to not run it again when knitting
+saveRDS(lda_fit, file="model_results/lda_fit.RData")
+
+```
+
+### LDA metrics
+```{r}
+
+# Include LDA already fitted
+lda_fit <- readRDS("model_results/lda_fit.RData")
+
+# Collect metrics of lda
+collect_metrics(lda_fit)
+
+```
+
+Compared to the multinomial model using cross-validation, both perform almost exactly the same. The point estimate of the ROC AUC of the multinomial is within one standard deviation of the estimate using LDA. 
+
+## Fit a QDA model using using 5 fold cross-validation
+
+I also estimate a QDA. In this case I specify the model using a quadratic discriminant and the MASS engine. I fit the same recipe as before in 5 folds.
+```{r , eval=FALSE}
+# Specify a QDA model for classification
+qda_spec <- discrim_quad() %>% 
+  set_engine("MASS") %>% 
+  set_mode("classification")
+
+# create a workflow
+qda_wkflow <- workflow() %>% 
+  add_model(qda_spec) %>% 
+  add_recipe(games_recipe)
+
+# Fit the model
+qda_fit <- fit_resamples(qda_wkflow, results_fold)
+
+# Save results as an R object to not run it again when knitting
+saveRDS(qda_fit, file="model_results/qda_fit.RData")
+```
+
+
+### QDA metrics 
+```{r}
+
+# Include QDA already fitted
+qda_fit <- readRDS("model_results/qda_fit.RData")
+
+# Collect metrics 
+collect_metrics(qda_fit)
+```
+
+Compared to the previous two models using cross-validation,QDA performs worst in terms of ROC AUC The point estimate is around 3 percentage points lower than both models. 
+
+## Fit Elastic Net
+
+For the next model I will fit a elastic net. I use a multinomial regression and perform thE estimation using a `glmnet` engine. The recipe is the same as before.
+
+```{r}
+# Specify a multinomial logistic regression model for classification
+elastic_net_spec <- multinom_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet")
+
+# create a workflow
+en_workflow <- workflow() %>% 
+  add_model(elastic_net_spec) %>% 
+  add_recipe(games_recipe)
+
+# Set grids for penalty mixture
+en_grid <- grid_regular(penalty(range = c(-5, 5)), 
+                        mixture(range = c(0, 1)), levels = 10)
+```
+
+I perform 5-fold cross validation to tune the model and choose two hyperparameters the mixture, i.e the proportion of the Lasso regularization term on the estimation and the penalty, i.e the value of the penalty term that regularize the regression. The values considered in the tunnning are between -5 and 5 for the penalty term, and 10 mixtures equally spaced between 0 and 1.  
+```{r , eval=FALSE}
+# Tune the model
+tune_en <- tune_grid(
+  en_workflow,
+  resamples =results_fold, 
+  grid = en_grid
+)
+
+# Save results as an R object to not run it again when knitting
+saveRDS(tune_en, file="model_results/tune_elastic_net.RData")
+
+```
+
+
+### Analysis Elastic Net
+```{r}
+
+# Include Elastic Net already fitted
+tune_en <- readRDS("model_results/tune_elastic_net.RData")
+
+# Plot
+autoplot(tune_en)
+
+```
+
+
+I plotted the accuracy and ROC AUC as a function of the tunned hypermarameters. We can observe that the models with higher accuracy/ROC AUC have lower levels of the penalty term but still have a share of the regularization that gives more weight to the lasso term. The best model has a penalty term of 0.0016 and a mixture of 1. The global ROC AUC of this model is 82.5% improving slightly the results of the LDA and multinomial logit. It is worth to analyse which outcome is predicting better the model. We can see in the plots of the ROC AUC that the drawings are the results that the model has more difficulty to predict. Indeed, based on the distribution of the outcomes, it is difficult to separate draws from wins and losses using linear relations. We can see also from the confusion matrix that this model tends to over predict draws as winnings for home teams.
+
+
+```{r}
+# Select best model
+best_model <- select_best(tune_en, metric = "roc_auc")
+
+# Select best model
+en_final <- finalize_workflow(en_workflow, best_model)
+
+# Fit with best model
+en_final_fit <- fit(en_final, data = results_train)
+
+# Accuracy
+show_best(tune_en, metric = "roc_auc")
+
+# Save predictions
+predicted_data <- augment(en_final_fit, new_data = results_train) %>% 
+  select(home_result, starts_with(".pred"))
+
+# Overall ROC
+predicted_data %>% roc_auc(home_result, .pred_draw:.pred_win)
+
+# Plotted curves
+predicted_data %>% roc_curve(home_result, .pred_draw:.pred_win) %>% 
+  autoplot()
+
+# Confusion matrix (this cannot predict draws)
+predicted_data %>% 
+  conf_mat(truth = home_result, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+## Prunned Tree
+
+The next model us a prunned tree. Now, the specification will use a decision tree to classify the outcomes. The hyperparameter I choosed to tune in this model is the cost complexity, the penalty term on the number of trees.
+
+```{r}
+
+# Specify tree
+tree_spec <- decision_tree() %>%
+  set_engine("rpart")
+
+# Model specification
+class_tree_spec <- tree_spec %>%
+  set_mode("classification")
+
+# Workflow tuning and cost_complexity
+class_tree_wf <- workflow() %>%
+  add_model(class_tree_spec %>% 
+              set_args(cost_complexity = tune())) %>%
+  add_recipe(games_recipe)
+
+#creating a grid of values for cost_complexity
+param_grid <- grid_regular(cost_complexity(range = c(-3,-1)), levels = 10)
+```
+
+```{r , eval=FALSE}
+#fitting the models on the validation folds
+tune_res <- tune_grid(
+  class_tree_wf,
+  resamples = results_fold,
+  grid = param_grid,
+  metrics = metric_set(roc_auc)
+)
+
+# Save results as an R object to not run it again when knitting
+saveRDS(tune_res, file="model_results/class_tree_fit.RData")
+
+```
+
+### Analysis prunned tree
+This model performs worst than models seen previously.  The best cost complexity has a low value and does not produce a model with and ROC AUC larger than 78.9% in the training data. The model is choosing as most important variable the share games won in the last 5 games. It is not considering as important the rankings which I think they are.
+
+```{r}
+
+# Include prunned tree
+tune_res <- readRDS("model_results/class_tree_fit.RData")
+
+# Accuracy
+show_best(tune_res, metric = "roc_auc")
+
+# Select best model
+best_model <- select_best(tune_res, metric = "roc_auc")
+
+# Choose best model
+class_tree <- finalize_workflow(class_tree_wf, best_model)
+
+# Fit the model and plot
+class_tree_fit <- fit(class_tree, data = results_train)
+
+#ROC AUC for the training set
+augment(class_tree_fit, new_data = results_train) %>% 
+ roc_auc(truth = home_result, estimate = .pred_draw:.pred_win)
+
+# Visualize tree
+class_tree_fit %>%
+  extract_fit_engine() %>%
+  rpart.plot()
+
+# Plot the cost complexity
+autoplot(tune_res)
+
+# PLOT ROC CURVES
+augment(class_tree_fit, new_data = results_train) %>%
+ roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
+
+```
+
+# Random Forest
+
+The next model I estimate is a random forest. I choosed to tune three hyperparameters: The number of variables chosen at random, the number of trees and the minimun sample in each leave. The engine is ranger and importance chosen as `impurity`. I chosen to select at maximum 5 random variables and test a large number of trees (2000). 
+```{r}
+# Specify random forest
+rf_spec <- rand_forest(mtry = tune(),
+                       trees = tune(),
+                       min_n = tune() ) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+#setting up workflow
+rf_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(games_recipe)
+
+#Creating regular grids 
+grid <- grid_regular(mtry(range = c(1,5)), 
+                     trees(range = c(1,2000)), 
+                     min_n(range = c(10,80)), levels = 8)
+```
+
+```{r , eval=FALSE}
+#Tunning the model
+tune_rf <- tune_grid(
+  rf_wf,
+  resamples = results_fold,
+  grid = grid,
+  metrics = metric_set(roc_auc)
+)
+
+#Save tune_res_rf as an R object to not run it again when knitting
+saveRDS(tune_rf, file="model_results/random_forest.RData")
+```
+
+## Analysis random forest
+The results of the random forest outperform any model so far, the ROC AUC of the model in the training set is 94.5%. Increasing the number of trees and variables increased considerably the performance of the model. The model is so far the only one also predicting accurately draws which may account for the large increase in the performance of the model.
+
+```{r}
+
+# Include random forest
+tune_rf <- readRDS("model_results/random_forest.RData")
+
+# Analysis random forest
+autoplot(tune_rf, metric = "roc_auc")
+
+# Best model
+show_best(tune_rf, metric = "roc_auc") %>% select(-.estimator, -.config)
+
+# Finalize workflow
+rf_workflow_tuned <- rf_wf %>% 
+  finalize_workflow(select_best(tune_rf, metric = "roc_auc"))
+
+# Test in trainigng
+test_fit_rf <- fit(rf_workflow_tuned, data = results_train)
+
+#ROC AUC for the testing set
+augment(test_fit_rf, new_data = results_train) %>% 
+ roc_auc(truth = home_result, estimate = .pred_draw:.pred_win)
+
+# PLOT ROC CURVES
+augment(test_fit_rf, new_data = results_train) %>%
+ roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
+```
+
+## Boosted Tree
+The final model is a boosted tree, I chose to tune three hyperparameters: the number of trees, the number of variables randomly chosen and the learning rate. Given the computational power needed to fit trees, I started narrowing down the tunning using 3 levels on large ranges of the hyperparameters and narrow down the limits in the grids based on the results. The learning rate and the number of parameters used are the most important hyper parameters of the model. One tells the number of predictors and the other the speed at which the model learns, with lower speed resulting in more robust models.
+```{r}
+
+# Specification
+boost_spec <- boost_tree(trees = tune() , learn_rate = tune() , mtry = tune())  %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+# Workflow
+boost_wf <- workflow() %>%
+  add_model(boost_spec) %>%
+  add_recipe(games_recipe)
+
+# Creating grids 
+boosted_grid <- grid_regular(trees(range = c(10,100)),
+                             mtry = mtry(range= c(8, 25)),
+                             learn_rate = learn_rate(range = c(0, 0.2)) ,
+                             levels = 3)
+```
+
+```{r , eval=FALSE}
+# Tunning
+tune_res_boosted <- tune_grid(
+  boost_wf,
+  resamples = results_fold,
+  grid = boosted_grid,
+  metrics = metric_set(roc_auc)
+)
+
+#Save tune_res_rf as an R object to not run it again when knitting
+saveRDS(tune_res_boosted, file="model_results/boosted_tree_new.RData")
+```
+
+### Analysis boosted tree
+The boosted tree also improved substantially the ROC AUC in the training data compared to models non using trees and the prunned tree. Its ROC AUC in the training data is 95.40% which is smaller but not much compared to the random forest.
+
+```{r}
+# Include Boosted Tree
+tune_res_boosted <- readRDS("model_results/boosted_tree_new.RData")
+
+boosted_workflow_tuned <- boost_wf %>% 
+  finalize_workflow(select_best(tune_res_boosted, metric = "roc_auc"))
+
+# Best model
+show_best(tune_res_boosted, metric = "roc_auc") %>% select(-.estimator, -.config)
+```
+
+We can also see that, for higher learning rates, the model randomly selects more predictors. However, it is not the best to increase the number of trees and predictors as it could cause overfitting.
+
+
+```{r}
+# Plot ROC
+autoplot(tune_res_boosted)
+
+# Test in trainigng
+fit_boost <- fit(boosted_workflow_tuned, data = results_train)
+
+#ROC AUC for the testing set
+augment(fit_boost, new_data = results_train) %>% 
+ roc_auc(truth = home_result, estimate = .pred_draw:.pred_win)
+
+```
+
+One positive side of the model is the improvement on the forecasting of draws. 
+```{r}
+# PLOT ROC CURVES
+augment(fit_boost, new_data = results_train) %>%
+ roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
+
+
+```
+
+# Choosing the best model
+
+As we saw previously the best models to explain football outcomes are random forest and boosted trees. Now I will evaluate the predictive power of both in the testing data to compare their performance.
+
+
+**Boosted tree**: Its performance in the testing data is around 80% which is high. 
+```{r}
+
+
+#ROC AUC for the testing set using boosted trees
+augment(fit_boost, new_data = results_test) %>% 
+ roc_auc(truth = home_result, estimate = .pred_draw:.pred_win)
+
+# PLOT ROC CURVES using boosted trees
+augment(fit_boost, new_data = results_test) %>%
+ roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
+
+
+```
+**Random forest**: As we saw before in the training data, the random forest performs better. It turns out that in the testing it does it as well with around 1.6 percentage points larger ROC AUC than the boosted tree. 
+```{r}
+#ROC AUC for the testing set
+augment(test_fit_rf, new_data = results_test) %>% 
+ roc_auc(truth = home_result, estimate = .pred_draw:.pred_win)
+
+# PLOT ROC CURVES
+augment(test_fit_rf, new_data = results_test) %>%
+ roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
+
+```
+
+Therefore, the model I choose to predict the winner of the world cup is the **Random Forest**.
+
+
+# Out of sample prediction
+
+The following code includes the 60 matches played already during the world cup. I fit the model on those matches to see how preciscely the model could predict the results updating the data to the most recent information. 
+
+```{r}
+
+# Results for the entire history of the cups
+results <- read_csv("data/results_last.csv") %>% 
+  clean_names() %>% 
+add_row(date = as.Date('2022-12-09') , home_team ='Croatia' , away_team='Brazil' , home_score = 1 , away_score = 1 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE ) %>% 
+  add_row(date = as.Date('2022-12-09') , home_team ='Netherlands' , away_team='Argentina' , home_score = 2 , away_score = 2 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE ) %>% 
+  add_row(date = as.Date('2022-12-10') , home_team ='Morocco' , away_team='Portugal' , home_score = 1 , away_score = 0 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE ) %>% 
+add_row(date = as.Date('2022-12-10') , home_team ='England' , away_team='France' , home_score = 1 , away_score = 2 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE ) %>% 
+  add_row(date = as.Date('2022-12-13') , home_team ='Argentina' , away_team='Croatia' , home_score = 0 , away_score = 0 ,tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE ) %>% 
+add_row(date = as.Date('2022-12-14') , home_team ='France' , away_team='Morocco' , home_score = 0 , away_score = 0 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE )   %>% 
+add_row(date = as.Date('2022-12-18') , home_team ='Argentina' , away_team='Morocco' , home_score = 0 , away_score = 0 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE )  %>% 
+  add_row(date = as.Date('2022-12-17') , home_team ='France' , away_team='Croatia' , home_score = 0 , away_score = 0 , tournament ='FIFA World Cup' , city = 'Al Wakrah' , country ='Qatar' , neutral =TRUE )   %>% 
+  mutate(date = as.Date(date, "%Y-%m-%d")) %>% 
+  mutate(year=year(date) , month=month(date)) %>% 
+  filter(!is.na(home_score) | !is.na(away_score)) %>% 
+  mutate(home_result = factor(ifelse(home_score > away_score , "win" , 
+                                     ifelse(home_score == away_score , 
+                                            "draw" , "loss")))  ,
+         away_result = factor(ifelse(home_score < away_score , "win" , 
+                                     ifelse(home_score == away_score , 
+                                            "draw" , "loss") )) , 
+         across('home_team', str_replace , "Brunei Darussalam" ,"Brunei") ,
+         across('away_team', str_replace , "Brunei Darussalam" ,"Brunei")) %>% 
+  dummy_cols(select_columns = c('home_result' , 'away_result')) 
+
+# Include in the main database the FIFA game score
+
+results <- results %>% 
+  left_join(fifa_game_scores , c("home_team" = "nationality_name" , "year")) %>% 
+  rename_at(vars(overall , npg),function(x) paste0(x,"_home")) %>% 
+  left_join(fifa_game_scores , c("away_team" = "nationality_name" , "year")) %>% 
+  rename_at(vars(overall , npg),function(x) paste0(x,"_away"))
+
+# Include in the main database the FIFA ranking
+results <- results %>% 
+  left_join(fifa_ranking , c("home_team" = "country_full" , "year")) %>% 
+  rename_at(vars(ranking_fifa),function(x) paste0(x,"_home")) %>% 
+  left_join(fifa_ranking , c("away_team" = "country_full" , "year")) %>% 
+  rename_at(vars(ranking_fifa),function(x) paste0(x,"_away"))
+
+# Include in the main database and indicator of a match played by countries 
+# in the current WC
+
+results <- results %>% 
+  left_join(world_cup_countries , c("home_team" = "team")) %>% 
+  left_join(world_cup_countries , c("away_team" = "team")) %>% 
+  mutate(playing_wc = if_else((playing_wc.x == 1 | playing_wc.y == 1), 
+                               1 , 0, missing = 0)) %>% 
+  select(-playing_wc.x  , -playing_wc.y)
+
+# Results as list
+#----------------------------------------------------------------------
+
+# Create a dataset with information about home teams
+results_home <- results %>% 
+  rename( team = home_team , goals_scored = home_score ,
+          goals_received = away_score ,
+          win = home_result_win , 
+          draw = home_result_draw ,
+          loss = home_result_loss ,
+          ranking_fifa = ranking_fifa_home, 
+          ranking_fifa_opp = ranking_fifa_away ,
+          overall = overall_home  , 
+          overall_opp = overall_away ) %>%  
+  select(year , team , goals_scored , goals_received , 
+         win, draw , loss , tournament , date , starts_with("ranking_fifa") ,
+         starts_with("overall"))  %>% 
+  mutate(home = 1)
+
+# Create a dataset with information about visiting teams
+results_away <- results %>% 
+  rename( team = away_team , goals_scored = away_score ,
+          goals_received = home_score ,
+          win = away_result_win , 
+          draw = away_result_draw ,
+          loss = away_result_loss ,
+          ranking_fifa = ranking_fifa_away, 
+          ranking_fifa_opp = ranking_fifa_home ,
+          overall = overall_away  , 
+          overall_opp = overall_home) %>% 
+  select(year , team , goals_scored , goals_received , 
+           win, draw , loss , tournament , date , starts_with("ranking_fifa") ,
+           starts_with("overall"))  %>% 
+  mutate(home = 0)
+
+# Create a list of the countries that played the qualification phase to the WC 
+country_wc_qualifier <- results_home %>%  
+  bind_rows(results_away) %>% 
+  filter(year >2017 & tournament == "FIFA World Cup qualification") %>% 
+  select(team) %>% 
+  unique()
+
+# Update the results to matches where both countries played the qualification phase of 
+# the current World Cup
+
+results <- results %>% 
+  right_join(country_wc_qualifier , c("home_team" = "team"))  %>% 
+  right_join(country_wc_qualifier , c("away_team" = "team"))   
+  
+# Create a list of results of countries that played the current phase of the WC
+results_list <- results_home %>%  # home results
+  bind_rows(results_away) %>% # append away results
+  right_join(country_wc_qualifier) %>% 
+  mutate(points = win*3 + draw) %>% 
+  unique()
+  rm(results_home , results_away) # remove from memory duplicate data
+
+# List of tournaments
+tournaments <- results_list %>%
+  filter(year >2014) %>% 
+  select(tournament) %>% 
+  unique() 
+
+# Tournaments
+#----------------------------------------------------------------------
+
+# List of continental tournaments
+continental_tournaments <- c("AFC Asian Cup" ,
+                             "African Cup of Nations" ,
+                             "UEFA Euro qualification" ,
+                             "Gold Cup qualification" ,
+                             "Copa América" ,
+                             "African Cup of Nations qualification" ,
+                             "Gold Cup" ,
+                             "Oceania Nations Cup qualification" , 
+                             "Oceania Nations Cup" , 
+                             "UEFA Euro" , 
+                             "Confederations Cup" ,
+                             "UEFA Nations League" , 
+                             "CONCACAF Nations League" ,
+                             "FIFA World Cup" ,
+                             "Confederations Cup")
+
+# Historical results in a rolling window
+#--------------------------------------------------------------------------
+
+# Entire history
+results_hist <- results_list %>%  
+  mutate( n = 1) %>% 
+  arrange(team , date) %>% 
+  group_by(team) %>% 
+  mutate(sh_win = cummean(win)) %>% 
+  select(team, date , sh_win)
+
+# Since FIFA Ranking exists and there are 32 teams in the WC (Ranking FIFA available)
+results_hist_rf <- results_list %>%  
+  filter(year>=1994 & !is.na(ranking_fifa_opp)) %>% 
+  mutate( n = 1) %>% 
+  arrange(team , date) %>% 
+  group_by(team) %>% 
+  mutate(sh_win = cummean(win) , 
+         sh_loss = cummean(loss) , 
+         av_goal_sc = cummean(goals_scored) ,
+         av_goal_rec = cummean(goals_received) ,
+         av_rf_opp = cummean(ranking_fifa_opp)) %>% 
+  select(team, date , starts_with("sh_") , 
+         starts_with("av_")) 
+
+# Rolling basis results
+#----------------------------------------------------------------------
+
+# All last matches
+results_rolling <- results_list %>% 
+  arrange(team , date) %>% 
+  group_by(team) %>% 
+  mutate(match_number = seq_along(team)) %>% 
+  ungroup() %>% 
+  filter(!is.na(ranking_fifa_opp)) %>% 
+  mutate(m5_goals_sc = ifelse(match_number > 5 , rollmean(goals_scored, k = 5, fill = NA , align="right") , NA) ,
+         m15_goals_sc = ifelse(match_number > 15 , rollmean(goals_scored, k = 15, 
+                                                            fill = NA , align="right") , NA) ,
+         m5_goals_rec = ifelse(match_number > 5 , rollmean(goals_received, k = 5, 
+                                                           fill = NA , align="right") , NA) ,
+         m15_goals_rec = ifelse(match_number > 15 , rollmean(goals_received,
+                                                             k = 15, fill = NA , align="right") , NA) ,
+         m5_sh_win = ifelse(match_number > 5 , rollmean(win, k = 5, fill = NA , align="right") , NA) ,
+         m15_sh_win = ifelse(match_number > 15 , rollmean(win, k = 15, fill = NA , align="right") , NA) ,
+         m5_sh_loss = ifelse(match_number > 5 , rollmean(loss, k = 5, fill = NA , align="right") , NA) ,
+         m15_sh_loss= ifelse(match_number > 15 , rollmean(loss, k = 15, fill = NA , align="right") , NA) ,
+         m5_rf_opp = ifelse(match_number > 5 , rollmean(ranking_fifa_opp, k = 5, fill = NA ,
+                                                        align="right") , NA) ,
+         m15_rf_opp = ifelse(match_number > 15 , rollmean(ranking_fifa_opp, k = 15, fill = NA ,
+                                                        align="right") , NA) ,
+        m30_goals_sc = ifelse(match_number > 30 , rollmean(goals_scored, k = 30, fill = NA , align="right") , NA),
+        m30_goals_rec = ifelse(match_number > 30 , rollmean(goals_received, k = 30, fill = NA ,
+                                                            align="right"),NA),
+        m30_sh_win = ifelse(match_number > 30 , rollmean(win, k = 30, fill = NA , align="right") , NA) ,
+        m30_sh_loss = ifelse(match_number > 30 , rollmean(loss, k = 30, fill = NA , align="right") , NA) ,
+        m30_rf_opp = ifelse(match_number > 30 , rollmean(ranking_fifa_opp, k = 30, fill = NA ,
+                                                        align="right") , NA)) %>% 
+  select(team, date , starts_with("m5") , starts_with("m15") , starts_with("m30")) 
+         
+# Results in world cups
+#----------------------------------------------------------------------
+
+# Filter the matches played in the World Cups and create a rolling sum of the
+# number of matches
+results_wc <- results_list %>%  
+  filter(tournament == "FIFA World Cup") %>% 
+  mutate( n = 1) %>% 
+  group_by(team , year) %>%
+  summarize( matches = sum(n)) %>% 
+  ungroup() %>% 
+  group_by(team) %>%  complete(year = seq(1930,2018)) %>%
+  mutate(across(matches , ~replace_na(.,0))) %>% 
+  mutate(n_matches_wch = cumsum(matches),
+         year = year +4) %>% 
+  select(-matches)
+
+# Join with results
+#----------------------------------------------------------------------
+
+# Keep just information of the matches played since 2014
+results <- results %>% 
+  filter(year >=2014) %>% 
+  filter(home_team !=away_team) %>%
+  unique() %>% 
+  filter(!is.na(ranking_fifa_home)) %>% 
+  filter(!is.na(ranking_fifa_away))  # Remove games with countries outside ranking FIFA
+  
+# Join historical results
+results <- results %>% 
+  left_join(results_hist ,by =c("home_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win),function(x) paste0(x,"_hist_home")) %>% 
+  left_join(results_hist , by =c("away_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win),function(x) paste0(x,"_hist_away")) 
+
+# Join historical results since Ranking FIFA exists
+results <- results %>% 
+  left_join(results_hist_rf ,by =c("home_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win:av_rf_opp),function(x) paste0(x,"_hist_rf_home")) %>% 
+  left_join(results_hist_rf , by =c("away_team" = "team" , "date")) %>% 
+  rename_at(vars(sh_win:av_rf_opp),function(x) paste0(x,"_hist_rf_away")) 
+
+# Join rolling basis 
+results <- results %>% 
+  left_join(results_rolling , by =c("home_team" = "team" , "date")) %>% 
+  rename_at(vars(m5_goals_sc:m30_rf_opp),function(x) paste0(x,"_home")) %>% 
+  left_join(results_rolling , by =c("away_team" = "team" , "date")) %>% 
+  rename_at(vars(m5_goals_sc:m30_rf_opp),function(x) paste0(x,"_away"))
+
+# Join results in World Cups
+results <- results %>% 
+  left_join(results_wc , by =c("home_team" = "team" , "year")) %>% 
+  rename_at(vars(ends_with("_wch")),function(x) paste0(x,"_home")) %>%  
+  left_join(results_wc , by =c("away_team" = "team" , "year")) %>% 
+  rename_at(vars(ends_with("_wch")),function(x) paste0(x,"_away")) %>%    
+  mutate(across(n_matches_wch_home:n_matches_wch_away , ~replace_na(.,0)))
+
+# Create a smaller dataset with the variables that will be used in the model
+results <- results %>% 
+         mutate(ranking_fifa_dha = ranking_fifa_home - ranking_fifa_away ,
+                overall_dha =  overall_home - overall_away  ,
+                sh_win_hist_dha = sh_win_hist_home - sh_win_hist_away  , 
+                sh_win_dha = sh_win_hist_rf_home - sh_win_hist_rf_away  , 
+                sh_loss_dha = sh_loss_hist_rf_home - sh_loss_hist_rf_away  , 
+                av_goal_sc_dha = av_goal_sc_hist_rf_home - av_goal_sc_hist_rf_away ,
+                av_goal_rec_dha = av_goal_rec_hist_rf_home - av_goal_rec_hist_rf_away ,
+                av_rf_opp_dha = av_rf_opp_hist_rf_home - av_rf_opp_hist_rf_away , 
+                w_sh_win_dha = av_rf_opp_hist_rf_home*sh_win_hist_rf_home -
+                  sh_win_hist_rf_away*av_rf_opp_hist_rf_away ,
+                m5_sh_win_dha = m5_sh_win_home - m5_sh_win_away  , 
+                w_m5_sh_win_dha = m5_sh_win_home*m5_rf_opp_home - m5_sh_win_away*m5_rf_opp_away  , 
+                m5_sh_loss_dha = m5_sh_loss_home - m5_sh_loss_away  , 
+                m5_goals_sc_dha = m5_goals_sc_home - m5_goals_sc_away ,
+                m5_goals_rec_dha = m5_goals_rec_home - m5_goals_rec_away ,
+                m5_rf_opp_dha = m5_rf_opp_home - m5_rf_opp_away ,
+                m15_sh_win_dha = m15_sh_win_home - m15_sh_win_away  , 
+                w_m15_sh_win_dha = m15_sh_win_home*m15_rf_opp_home - 
+                  m15_sh_win_away*m15_rf_opp_away  , 
+                m15_sh_loss_dha = m15_sh_loss_home - m15_sh_loss_away  , 
+                m15_goals_sc_dha = m15_goals_sc_home - m15_goals_sc_away ,
+                m15_goals_rec_dha = m15_goals_rec_home - m15_goals_rec_away ,
+                m15_rf_opp_dha = m15_rf_opp_home - m15_rf_opp_away , 
+                 m30_sh_win_dha = m30_sh_win_home - m30_sh_win_away  , 
+                w_m30_sh_win_dha = m30_sh_win_home*m30_rf_opp_home - 
+                  m30_sh_win_away*m30_rf_opp_away  , 
+                m30_sh_loss_dha = m30_sh_loss_home - m30_sh_loss_away  , 
+                m30_goals_sc_dha = m30_goals_sc_home - m30_goals_sc_away ,
+                m30_goals_rec_dha = m30_goals_rec_home - m30_goals_rec_away ,
+                m30_rf_opp_dha = m30_rf_opp_home - m30_rf_opp_away ,
+                n_matches_wch_dha=n_matches_wch_home - n_matches_wch_away , 
+                score_dha = home_score - away_score) %>% 
+  select(date , home_team , away_team , tournament , neutral , year, date , home_result , country, ends_with("_dha")) 
+  
+
+wc_predc <- results %>% 
+  filter(tournament == "FIFA World Cup" & country =="Qatar")  %>% 
+  mutate(home_result=factor(home_result) , 
+         neutral=ifelse(neutral =="TRUE" , 1 , 0) , 
+         friendly = ifelse(tournament =="Friendly" , 1 , 0) , # Create dummies for friendly matches
+         world_cup = ifelse(tournament =="FIFA World Cup" , 1 , 0), # Create for WC  matches
+         continental_tr = ifelse(tournament %in% continental_tournaments, 1 , 0) , # Create Tournaments
+         qualifier = ifelse(tournament =="FIFA World Cup qualification" , 1 , 0)) %>%  # Dummy for qualifier matches
+         # Dummy code years
+  filter(!is.na(m30_sh_win_dha)) # Filter missing values for countries that are recent adds to FIFA 
+
+quarter_final <- wc_predc %>% 
+  filter(tournament == "FIFA World Cup" & country =="Qatar" & date < as.Date('2022-12-13'))  %>% 
+  mutate(home_result=factor(home_result) , 
+         neutral=ifelse(neutral =="TRUE" , 1 , 0) , 
+         friendly = ifelse(tournament =="Friendly" , 1 , 0) , # Create dummies for friendly matches
+         world_cup = ifelse(tournament =="FIFA World Cup" , 1 , 0), # Create for WC  matches
+         continental_tr = ifelse(tournament %in% continental_tournaments, 1 , 0) , # Create Tournaments
+         qualifier = ifelse(tournament =="FIFA World Cup qualification" , 1 , 0)) %>%  # Dummy for qualifier matches
+         # Dummy code years
+  filter(!is.na(m30_sh_win_dha)) # Filter missing values for countries that are recent adds to FIFA 
+
+
+semi_final <- wc_predc %>% 
+  filter(tournament == "FIFA World Cup" & country =="Qatar" & date < as.Date('2022-12-15'))  %>% 
+  mutate(home_result=factor(home_result) , 
+         neutral=ifelse(neutral =="TRUE" , 1 , 0) , 
+         friendly = ifelse(tournament =="Friendly" , 1 , 0) , # Create dummies for friendly matches
+         world_cup = ifelse(tournament =="FIFA World Cup" , 1 , 0), # Create for WC  matches
+         continental_tr = ifelse(tournament %in% continental_tournaments, 1 , 0) , # Create Tournaments
+         qualifier = ifelse(tournament =="FIFA World Cup qualification" , 1 , 0)) %>%  # Dummy for qualifier matches
+         # Dummy code years
+select(-tournament) %>% # Remove the tournament variable
+  filter(!is.na(m30_sh_win_dha)) # Filter missing values for countries that are recent adds to FIFA 
+
+
+# Export cleaned dataset
+#write_csv(results, "data/results_cleaned.csv")
+
+
+```
+
+
+We can observe that the ROC AUC of the model using the matches played in this cup is not as high as expected. It is close to 68%. The most challenging part is to predict draws and we can see it in the graph.
+
+
+```{r}
+#ROC AUC for the testing set
+augment(test_fit_rf, new_data = quarter_final) %>% 
+ roc_auc(truth = home_result, estimate = .pred_draw:.pred_win)
+
+# PLOT ROC CURVES
+augment(test_fit_rf, new_data = quarter_final) %>%
+ roc_curve(truth = home_result, estimate = .pred_draw:.pred_win) %>% autoplot()
+```
+
+In terms of performance of the model, looking at the results I think is not a bad model. However, a short tournament with that level is more difficult to predict. The model predicted reasonable outcomes, however, many surprises happened during the cup.
+
+
+Finally, I included the last four matches that will be played next week. 
+
+
+```{r}
+
+
+augment(test_fit_rf, new_data = wc_predc) %>% 
+  select(home_team , away_team, .pred_class) %>% 
+  tail(4)
+
+```
+
+
+The first semifinal is Argentina vs Croatia and the model predicts Argentina will win, The second semi-final is Morocco vs France and the model predicts Morocco will win. Then the last two matches are for the 3rd place in which case France would win to Croatia and the Final will be won by: **Argentina** against Morocco. 
+
+
+<center>![](images/messi.jpg){width="500"}</center>
+
 
 # References
 
